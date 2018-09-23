@@ -4,6 +4,14 @@ var request = require('request');
 const PropertiesReader = require('properties-reader');
 const properties = PropertiesReader('conf/app.properties');
 
+var express = require('express');
+var app = express();
+
+var bodyParser = require('body-parser');
+// Parse incoming requests data
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: false }));
+
 class Database {
     constructor( config ) {
         this.connection = mysql.createConnection( config );
@@ -85,9 +93,10 @@ console.log('body: ' + JSON.stringify(body));
                 this.database.get_option( 'hbo_cloudbeds_useragent' )
             ])
             .then( ([cookies, user_agent]) => {
-                let PROPERTY_ID = 17363;
+                let PROPERTY_ID = properties.get( 'app_config.cloudbeds.property.id' );
                 console.log('cookies: ' + cookies);
                 console.log('user_agent: ' + user_agent);
+                console.log('property: ' + PROPERTY_ID);
                 resolve( {
                         "Accept" : "application/json, text/javascript, */*; q=0.01",
                         "Content-Type" : "application/x-www-form-urlencoded; charset=UTF-8",
@@ -118,10 +127,14 @@ console.log('body: ' + JSON.stringify(body));
                 headers: headers
             }) );
     }
+    
+    get_reservation( query ) {
+    }
 }
 
-http.createServer( function (req, res) {
-    res.writeHead(200, {'Content-Type': 'application/json'});
+app.get('/ping', function (req, res) {
+
+    res.setHeader('Content-Type', 'application/json');
     
     let db_config = properties.path().db_config;
     if( ! db_config ) {
@@ -137,18 +150,22 @@ http.createServer( function (req, res) {
     
     const cbs = new CloudbedsService( db );
     
+    cbs.ping().then( answer => 
+        res.status(200).send({ response : answer }) )
+    .catch( console.error );
 
-(async () => {
-  try {
-    let ping_response = await cbs.ping();
-    console.log( 'ping_response: ' + ping_response );
-    res.write( JSON.stringify( ping_response ) );
+});
 
-  }  catch (e) {
-    console.error(e);
-  }
-    db.close(); 
-    res.end();
-})();
+app.post('/lookup_reservation', function (req, res) {
+    console.log(JSON.stringify(req.body));
+    res.setEncoding('utf8');
+    res.setHeader('Content-Type', 'application/json');
+    
+    res.status(200).send({ msg : "done"});
+});
 
-}).listen(8080);
+var server = app.listen(8080, function () {
+
+  console.log("cloudbeds_web_api listening on port ", server.address().port)
+
+});
