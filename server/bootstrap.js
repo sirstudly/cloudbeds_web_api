@@ -29,6 +29,7 @@ class Database {
     close() {
         return new Promise( ( resolve, reject ) => {
             this.connection.end( err => {
+                console.log('Closing db id ' + this.connection.threadId);
                 if ( err )
                     return reject( err );
                 resolve();
@@ -72,13 +73,15 @@ class CloudbedsService {
 
     send_request( params ) {
         return new Promise( ( resolve, reject ) => {
-            request( params, function ( error, response, body ) {
+console.log( "requesting " + params.url );
+        	request( params, function ( error, response, body ) {
                 if( error ) {
+//console.error( error );
                     reject( error );
                 }
                 else {
-console.log('response: ' + JSON.stringify(response));
-console.log('body: ' + JSON.stringify(body));
+//console.log('response: ' + JSON.stringify(response));
+//console.log('body: ' + JSON.stringify(body));
                     resolve( body );
                 }
             });
@@ -132,9 +135,10 @@ console.log('body: ' + JSON.stringify(body));
         let PROPERTY_ID = properties.get( 'app_config.cloudbeds.property.id' );
         return Promise.all([
         	this.default_headers(),
-            this.database.get_option( 'hbo_cloudbeds_version' )
+            this.database.get_option( 'hbo_cloudbeds_version' ),
+            this.get_reservation_source_ids()
         ])
-        .then( ([headers, cb_version]) => 
+        .then( ([headers, cb_version, source_ids]) => 
 	        this.send_request({
 	            url: "https://hotels.cloudbeds.com/connect/reservations/get_reservations",
 	            method: "POST",
@@ -231,7 +235,7 @@ console.log('body: ' + JSON.stringify(body));
 	            	"query": query,
 	            	"room_types": "",
 	            	"roomsData[0]": "room_numbers",
-	            	"source": "assoc-18266,assoc-0,dir-1,dir-2,dir-3,dir-5,dir-0,6-0,7-75119-0,7-75119-1,7-75120-0,7-75120-1,7-80174-1,7-75117-1,7-75121-0,7-75121-1,7-0,8-0,9-80045-1,9-0",
+	            	"source": source_ids.join(','),
 	            	"date_stay[0]": "",
 	            	"date_stay[1]": "",
 	            	"property_id": PROPERTY_ID,
@@ -239,6 +243,55 @@ console.log('body: ' + JSON.stringify(body));
 	            	"version": cb_version.option_value
 	            }
 	        }) );
+    }
+
+    /*
+     * Retrieves all reservation sources available for the property (used for searching)
+     */
+    get_reservation_sources() {
+        let PROPERTY_ID = properties.get( 'app_config.cloudbeds.property.id' );
+        return Promise.all([
+        	this.default_headers(),
+            this.database.get_option( 'hbo_cloudbeds_version' )
+        ])
+        .then( ([headers, cb_version]) => 
+            this.send_request({
+                url: "https://hotels.cloudbeds.com/associations/loader/sources",
+                method: "POST",
+                headers: headers,
+	            gzip: true,
+                form: {
+	            	"property_id": PROPERTY_ID,
+	            	"group_id": PROPERTY_ID,
+	            	"version": cb_version.option_value
+                }
+            }) );
+    }
+    
+    /*
+     * Calls get_reservation_sources() and collects all data-source-id returning them in an array.  
+     */
+    get_reservation_source_ids() {
+
+        /*
+         * Traverses the JSON object (o) looking for a matching (key) and if found,
+         * adds it to the array (result).
+         */
+        function collect_element_values( o, key, result ) {
+            for (let i in o) {
+            	if (!!o[i] && typeof(o[i])=="object") {
+            		collect_element_values( o[i], key, result );
+                }
+            	else if( i == key && typeof(o[i]) == "string" ) {
+                	result.push( o[i] );
+                }
+            }
+            return result;
+        }
+
+        return this.get_reservation_sources().then( answer =>
+    		collect_element_values( JSON.parse( answer ), "data-source-id", [] )
+    	);
     }
 }
 
@@ -260,10 +313,11 @@ app.get('/ping', function (req, res) {
     
     const cbs = new CloudbedsService( db );
     
-    cbs.ping().then( answer => 
-        res.status(200).send({ response : answer }) )
-    .catch( console.error );
+    cbs.ping()
+    	.then( answer => res.status(200).send({ response : answer }) )
+    	.catch( console.error );
 
+    db.close().catch( console.error );
 });
 
 app.post('/lookup_reservation', function (req, res) {
@@ -283,15 +337,70 @@ app.post('/lookup_reservation', function (req, res) {
     
     const cbs = new CloudbedsService( db );
     
-    console.log( "Looking up reservation " + req.body.reservation_id );
-    cbs.get_reservation( req.body.reservation_id ).then( answer => {
-    		console.log( JSON.stringify( answer ) );
-        	res.status(200).send({ response : answer }); 
-    	} )
-    .catch( err =>
-    	res.status(400).send({ success: false, error_message: err })
-    );
+    if( ! req.body.reservation_id ) {
+    	res.status(200).send({ success: false, error_message: "Missing reservation_id" } );
+    } 
+    else if( ! req.body.last_name ) {
+    	res.status(200).send({ success: false, error_message: "Missing last_name" } );
+    }
+    else {
+	    console.log( "Looking up reservation " + req.body.reservation_id );
+	    cbs.get_reservation( req.body.reservation_id )
+	    .then( answer => res.status(200).send( answer ) )
+	    .catch( err => res.status(400).send({ success: false, error_message: err } ) );
+    }
 
+    db.close().catch( console.error );
+});
+
+app.get('/get_reservation_sources', function (req, res) {
+    res.setHeader('Content-Type', 'application/json');
+   
+    let db_config = properties.path().db_config;
+    if( ! db_config ) {
+        throw Error( 'Missing db_config properties' );
+    }
+
+    const db = new Database( {
+        host     : db_config.host,
+        database : db_config.database,
+        user     : db_config.user,
+        password : db_config.password
+    } );
+    
+    const cbs = new CloudbedsService( db );
+    
+    cbs.get_reservation_sources()
+		.then( answer => res.status(200).send( answer ) )
+		.catch( err => res.status(400).send( { success: false, error_message: err } ) );
+    
+
+    db.close().catch( console.error );
+});
+
+app.get('/get_reservation_source_ids', function (req, res) {
+    res.setHeader('Content-Type', 'application/json');
+   
+    let db_config = properties.path().db_config;
+    if( ! db_config ) {
+        throw Error( 'Missing db_config properties' );
+    }
+
+    const db = new Database( {
+        host     : db_config.host,
+        database : db_config.database,
+        user     : db_config.user,
+        password : db_config.password
+    } );
+    
+    const cbs = new CloudbedsService( db );
+    
+    cbs.get_reservation_source_ids()
+		.then( answer => res.status(200).send( answer ) )
+		.catch( err => res.status(400).send( { success: false, error_message: err } ) );
+    
+
+    db.close().catch( console.error );
 });
 
 var server = app.listen(8080, function () {
